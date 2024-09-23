@@ -1,0 +1,58 @@
+---
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: rhtap-install
+spec:
+  params:
+    - name: ocp-login-command
+      type: string
+      description: ""
+    - name: job-spec
+      type: string
+      description: "The job specification containing details of the test execution."
+  volumes:
+    - name: rhtap-cli-volume
+      secret:
+        secretName: rhtap-cli-install
+  steps:
+    - name: install
+      image: quay.io/rhtap/rhtap-e2e:latest
+      volumeMounts:
+        - name: rhtap-cli-volume
+          mountPath: /usr/local/rhtap-cli-install
+      env:
+        - name: JOB_SPEC
+          value: $(params.job-spec)
+      script: |
+        #!/usr/bin/env bash
+        set -o errexit
+        set -o nounset
+        set -o pipefail
+        set -x
+
+        # Login to OpenShift
+        export KUBECONFIG=$(pwd)/kubeconfig
+        echo "[INFO]Login: $(params.ocp-login-command)"
+        $(params.ocp-login-command)
+        echo "[INFO]Console: $(kubectl get routes -n openshift-console console -o jsonpath='{.spec.port.targetPort}://{.spec.host}')"
+
+        # JOB_SPEC="$(params.job-spec)"
+        echo "[DEBUG] JOB_SPEC: $JOB_SPEC"
+        GIT_REPO="$(echo "$JOB_SPEC" | jq -r '.git.git_repo')"
+
+        # Clone the rhtap-cli repository
+        if [ "${GIT_REPO}" = "rhtap-cli" ]; then
+            GIT_URL="$(echo "$JOB_SPEC" | jq -r '.git.source_repo_url')"
+            GIT_REVISION="$(echo "$JOB_SPEC" | jq -r '.git.commit_sha')"
+
+            echo -e "INFO: Cloning repository '$GIT_REPO' with revision '$GIT_REVISION' from URL '$GIT_URL'"
+            git clone "${GIT_URL}" .
+            git checkout "${GIT_REVISION}"
+        else
+            echo -e "INFO: Cloning repository 'redhat-appstudio/rhtap-cli' with revision 'main'"
+            git clone https://github.com/redhat-appstudio/rhtap-cli.git .
+        fi
+
+        ./integration-tests/scripts/minio.sh
+        ./integration-tests/scripts/partial-install.sh
