@@ -1,6 +1,0 @@
----
-apiVersion: v2
-name: rhtap-subscriptions
-description: RHTAP OpenShift Operator Subscriptions
-type: application
-version: 0.0.1

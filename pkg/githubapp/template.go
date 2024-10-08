@@ -17,11 +17,8 @@ const gitHubNewAppForTmpl = `
 const gitHubAppSuccessfullyCreatedTmpl = `
 <html>
 <body>
-	You have successfully created a new GitHub App %q, go back to the CLI to
-	finish the installation:
-	<pre>
-		$ rhtap-installer-cli deploy
-	</pre>
+	GitHub App successfully created.
+	Install <a href="%s">the new application</a> in your GitHub organization and continue the installation process.
 </body>
 </html>
 `

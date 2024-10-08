@@ -1,0 +1,121 @@
+{{- $name := printf "%s-test-%d" .Chart.Name .Release.Revision -}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: hook-succeeded
+  labels:
+    {{- include "rhtap-backing-services.labels" . | nindent 4 }}
+  name: {{ $name }} 
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ .Release.Name }}
+  initContainers:
+    #
+    # Copying the scripts that will be used on the subsequent containers, the
+    # scripts are shared via the "/scripts" volume.
+    #
+{{- include "backingServices.copyScripts" . | nindent 4 }}
+  containers:
+{{- if .Values.backingServices.keycloak.enabled }}
+    #
+    # Tests the Keycloak rollout status.
+    #
+  {{- $keycloak := .Values.backingServices.keycloak }}
+  {{- $keycloakName := include "backingServices.keycloak.name" . }}
+    - name: {{ printf "keycloak-%s" $keycloakName }}
+      image: quay.io/codeready-toolchain/oc-client-base:latest
+      env:
+        - name: NAMESPACE
+          value: {{ $keycloak.namespace }}
+        - name: RESOURCE_TYPE
+          value: "statefulset"
+      command:
+        - /scripts/test-rollout-status.sh
+      args:
+        - {{
+            printf "app=keycloak,app.kubernetes.io/instance=%s"
+              $keycloakName | quote
+          }}
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      securityContext:
+        allowPrivilegeEscalation: false
+{{- end }}
+{{- if .Values.backingServices.acs.enabled -}}
+  {{- $acs := .Values.backingServices.acs }}
+    #
+    # Test the ACS Central rollout status.
+    #
+    - name: {{ printf "acs-central-%s" $acs.name }}
+      image: quay.io/codeready-toolchain/oc-client-base:latest
+      env:
+        - name: NAMESPACE
+          value: {{ $acs.namespace }}
+        - name: RESOURCE_TYPE
+          value: "deployment"
+      command:
+        - /scripts/test-rollout-status.sh
+      args:
+        - {{
+            printf "app=central,app.kubernetes.io/instance=%s"
+              $acs.name | quote
+          }}
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      securityContext:
+        allowPrivilegeEscalation: false
+    #
+    # Test the ACS Scanners rollout status.
+    #
+    - name: {{ printf "acs-scanners-%s" $acs.name }}
+      image: quay.io/codeready-toolchain/oc-client-base:latest
+      env:
+        - name: NAMESPACE
+          value: {{ $acs.namespace }}
+        - name: RESOURCE_TYPE
+          value: "deployment"
+        - name: RETRIES
+          value: "10"
+      command:
+        - /scripts/test-rollout-status.sh
+      args:
+        - {{
+            printf "app=scanner,app.kubernetes.io/instance=%s"
+              $acs.name | quote
+          }}
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      securityContext:
+        allowPrivilegeEscalation: false
+{{- end }}
+{{- if .Values.backingServices.quay.enabled -}}
+  {{- $quay := .Values.backingServices.quay }}
+    #
+    # Test the Quay Registry components rollout status.
+    #
+    - name: {{ printf "quay-registry-%s" $quay.name }}
+      image: quay.io/codeready-toolchain/oc-client-base:latest
+      env:
+        - name: NAMESPACE
+          value: {{ $quay.namespace }}
+        - name: RESOURCE_TYPE
+          value: "deployment"
+      command:
+        - /scripts/test-rollout-status.sh
+      args:
+        - {{ printf "quay-operator/quayregistry=%s" $quay.name | quote }}
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      securityContext:
+        allowPrivilegeEscalation: false
+{{- end }}
+  volumes:
+    - name: scripts
+      emptyDir: {}

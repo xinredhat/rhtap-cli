@@ -1,0 +1,48 @@
+MinIO Tenants:
+{{- range $k, $v := include "infrastructure.minIOTenants.enabled" . | fromYaml }}
+  - Name: {{ $k }}
+    Namespace: {{ $v.namespace }}
+    Root Credentials: {{ $v.rootSecretName }} (Secret)
+{{- end }}
+
+Kafka Brokers:
+{{- range $k, $v := include "infrastructure.kafkas.enabled" . | fromYaml }}
+  - Name: {{ $k }}
+    Namespace: {{ $v.namespace }}
+    Username: {{ $v.username }}
+    Credentials: {{ $v.username }} (Secret)
+    Topics:
+  {{- range $t := $v.topics }}
+      - {{ $t.name }}
+  {{- end }}
+{{- end }}
+
+PostgreSQL Clusters:
+{{- range $k, $v := include "infrastructure.postgresClusters.enabled" . | fromYaml }}
+  - Namespace: {{ $v.namespace }}
+    Name: {{ $k }}
+    Version: {{ $v.postgresVersion }}
+{{- end }}
+
+{{- if .Values.infrastructure.openShiftPipelines.enabled }}
+  {{- $osp := .Values.infrastructure.openShiftPipelines }}
+
+OpenShift Pipelines:
+  {{- if or
+        $osp.patchClusterTektonConfig.annotations
+        $osp.patchClusterTektonConfig.labels
+  }}
+  Tekton Config Patch:
+    - Name: {{ $osp.patchClusterTektonConfig.resourceName }}
+    {{- with $osp.patchClusterTektonConfig.annotations }}
+      Annotations:
+{{ . | toYaml | indent 8 }}
+    {{- end }}
+    {{- with $osp.patchClusterTektonConfig.labels }}
+      Labels:
+{{ . | toYaml | indent 8 }}
+    {{- end }}
+  {{- end }}
+  Tekton Chains:
+    - Signing Keys Secret: {{ $osp.tektonChains.signingSecretName }}
+{{- end }}

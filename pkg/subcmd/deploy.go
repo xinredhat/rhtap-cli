@@ -3,17 +3,13 @@ package subcmd
 import (
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/redhat-appstudio/rhtap-cli/pkg/config"
-	"github.com/redhat-appstudio/rhtap-cli/pkg/deployer"
-	"github.com/redhat-appstudio/rhtap-cli/pkg/engine"
 	"github.com/redhat-appstudio/rhtap-cli/pkg/flags"
-	"github.com/redhat-appstudio/rhtap-cli/pkg/hooks"
+	"github.com/redhat-appstudio/rhtap-cli/pkg/installer"
 	"github.com/redhat-appstudio/rhtap-cli/pkg/k8s"
 
 	"github.com/spf13/cobra"
-	"helm.sh/helm/v3/pkg/chartutil"
 )
 
 // Deploy is the deploy subcommand.
@@ -21,10 +17,10 @@ type Deploy struct {
 	cmd    *cobra.Command // cobra command
 	logger *slog.Logger   // application logger
 	flags  *flags.Flags   // global flags
-	cfg    *config.Spec   // installer configuration
+	cfg    *config.Config // installer configuration
 	kube   *k8s.Kube      // kubernetes client
 
-	valuesTemplatePath string // path to the values template file
+	valuesTmplPath string // path to the values template file
 }
 
 var _ Interface = &Deploy{}
@@ -35,10 +31,13 @@ configuration to identify the features to be installed, and the dependencies to 
 resolved.
 
 The deployment configuration file describes the sequence of Helm charts to be
-applied, on the attribute 'rhtapInstallerCLI.dependencies[]'.
+applied, on the attribute 'rhtapCLI.dependencies[]'.
 
 The platform configuration is rendered from the values template file
 (--values-template), this configuration payload is given to all Helm charts.
+
+The installer resources are embedded in the executable, these resources are
+employed by default, to use local files, set the '--embedded' flag to false.
 `
 
 // Cmd exposes the cobra instance.
@@ -49,17 +48,11 @@ func (d *Deploy) Cmd() *cobra.Command {
 // log logger with contextual information.
 func (d *Deploy) log() *slog.Logger {
 	return d.flags.LoggerWith(
-		d.logger.With("values-template", d.valuesTemplatePath))
+		d.logger.With("values-template", d.valuesTmplPath))
 }
 
 // Complete verifies the object is complete.
 func (d *Deploy) Complete(_ []string) error {
-	if d.cfg == nil {
-		return fmt.Errorf("configuration is not informed")
-	}
-	if d.kube == nil {
-		return fmt.Errorf("kubernetes client is not informed")
-	}
 	return nil
 }
 
@@ -69,80 +62,64 @@ func (d *Deploy) Validate() error {
 		d.cmd.Context(),
 		d.log(),
 		d.kube,
-		d.cfg.Namespace,
+		d.cfg.Installer.Namespace,
 	)
 }
 
+// Run deploys the enabled dependencies listed on the configuration.
 func (d *Deploy) Run() error {
-	d.log().Debug("Loading values template file")
-	valuesTemplatePayload, err := os.ReadFile(d.valuesTemplatePath)
+	cfs, err := newChartFS(d.logger, d.flags, d.cfg)
 	if err != nil {
 		return err
 	}
 
-	d.log().Debug("Preparing values template context")
-	variables := engine.NewVariables()
-	if err := variables.SetInstaller(d.cfg); err != nil {
-		return err
-	}
-	if err := variables.SetOpenShift(d.cmd.Context(), d.kube); err != nil {
-		return err
+	d.log().Debug("Reading values template file")
+	valuesTmpl, err := cfs.ReadFile(d.valuesTmplPath)
+	if err != nil {
+		return fmt.Errorf("failed to read values template file: %w", err)
 	}
 
-	eng := engine.NewEngine(d.kube, string(valuesTemplatePayload))
+	// Installing each Helm Chart dependency from the configuration, only
+	// selecting the Helm Charts that are enabled.
+	d.log().Debug("Installing dependencies...")
+	deps := d.cfg.GetEnabledDependencies(d.log())
+	for ix, dep := range deps {
+		fmt.Printf("\n\n############################################################\n")
+		fmt.Printf("# [%d/%d] Deploying '%s' in '%s'.\n", ix+1, len(deps), dep.Chart, dep.Namespace)
+		fmt.Printf("############################################################\n")
 
-	for _, dep := range d.cfg.Dependencies {
-		logger := dep.LoggerWith(d.log())
+		i := installer.NewInstaller(d.log(), d.flags, d.kube, cfs, &dep)
 
-		hc, err := deployer.NewHelm(logger, d.flags, d.kube, dep)
+		err := i.SetValues(d.cmd.Context(), &d.cfg.Installer, string(valuesTmpl))
 		if err != nil {
 			return err
 		}
-
-		logger.Debug("Rendering values from template")
-		valuesBytes, err := eng.Render(variables)
-		if err != nil {
-			return err
+		if d.flags.Debug {
+			i.PrintRawValues()
 		}
 
-		logger.Debug("Preparing rendered values for Helm installation")
-		values, err := chartutil.ReadValues(valuesBytes)
-		if err != nil {
+		if err := i.RenderValues(); err != nil {
 			return err
+		}
+		if d.flags.Debug {
+			i.PrintValues()
 		}
 
-		hook := hooks.NewHooks(dep)
-		logger.Debug("Running pre-deploy hook script...")
-		if err = hook.PreDeploy(values); err != nil {
+		if err = i.Install(d.cmd.Context()); err != nil {
 			return err
 		}
-
-		// Performing the installation, or upgrade, of the Helm chart dependency,
-		// using the values rendered before hand.
-		logger.Debug("Installing the Helm chart")
-		if err = hc.Install(values); err != nil {
-			return err
-		}
-		// Verifying if the instaltion was successful, by running the Helm chart
-		// tests interactively.
-		logger.Debug("Verifying the Helm chart release")
-		if err = hc.Verify(); err != nil {
-			return err
-		}
-
-		logger.Debug("Running post-deploy hook script...")
-		if err = hook.PostDeploy(values); err != nil {
-			return err
-		}
-		logger.Info("Helm chart installed!")
+		fmt.Printf("############################################################\n\n")
 	}
+
+	fmt.Printf("Deployment complete!\n")
 	return nil
 }
 
+// NewDeploy instantiates the deploy subcommand.
 func NewDeploy(
 	logger *slog.Logger,
 	f *flags.Flags,
-	cfg *config.Spec,
+	cfg *config.Config,
 	kube *k8s.Kube,
 ) Interface {
 	d := &Deploy{
@@ -157,6 +134,6 @@ func NewDeploy(
 		cfg:    cfg,
 		kube:   kube,
 	}
-	flags.SetValuesTmplFlag(d.cmd.PersistentFlags(), &d.valuesTemplatePath)
+	flags.SetValuesTmplFlag(d.cmd.PersistentFlags(), &d.valuesTmplPath)
 	return d
 }

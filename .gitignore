@@ -1,3 +1,5 @@
+/__debug*
+/.vscode/
 /*.dll
 /*.dylib
 /*.exe
@@ -5,8 +7,7 @@
 /*.out
 /*.so
 /*.test
-/.vscode/
-/__debug*
 /bin
-/rhtap-installer-cli
+/installer/*.tar
+/rhtap-cli
 /tmp

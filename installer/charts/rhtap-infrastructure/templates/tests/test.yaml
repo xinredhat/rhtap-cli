@@ -1,0 +1,105 @@
+{{- $name := printf "%s-test-%d" .Chart.Name .Release.Revision -}}
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  annotations:
+    helm.sh/hook: test
+    helm.sh/hook-delete-policy: hook-succeeded
+  labels:
+    {{- include "rhtap-infrastructure.labels" . | nindent 4 }}
+  name: {{ $name }} 
+spec:
+  restartPolicy: Never
+  serviceAccountName: {{ .Release.Name }}
+  initContainers:
+    #
+    # Copying the scripts that will be used on the subsequent containers, the
+    # scripts are shared via the "/scripts" volume.
+    #
+{{- include "infrastructure.copyScripts" . | nindent 4 }}
+  containers:
+{{- range $k, $v := include "infrastructure.kafkas.enabled" . | fromYaml }}
+    - name: {{ printf "%s-kafka-topics-%s" $name $k }}
+      image: quay.io/codeready-toolchain/oc-client-base:latest
+      env:
+        - name: NAMESPACE
+          value: {{ $v.namespace }}
+      command:
+        - /scripts/test-kafka-topics.sh
+      args:
+  {{- range $t := $v.topics }}
+        - {{ printf "%s-%s" $k $t.name | quote }}
+  {{- end }}
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      securityContext:
+        allowPrivilegeEscalation: false
+{{- end }}
+{{- range $k, $v := include "infrastructure.minIOTenants.enabled" . | fromYaml }}
+    - name: {{ printf "%s-minio-tentant-%s" $name $k }}
+      image: quay.io/codeready-toolchain/oc-client-base:latest
+      env:
+        - name: NAMESPACE
+          value: {{ $v.namespace }}
+        - name: RESOURCE_TYPE
+          value: "statefulset"
+      command:
+        - /scripts/test-rollout-status.sh
+      args:
+        - {{ printf "v1.min.io/tenant=%s" $k | quote }}
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      securityContext:
+        allowPrivilegeEscalation: false
+{{- end }}
+{{- range $k, $v := include "infrastructure.postgresClusters.enabled" . | fromYaml }}
+    - name: {{ printf "%s-postgrescluster-%s" $name $k }}
+      image: quay.io/codeready-toolchain/oc-client-base:latest
+      env:
+        - name: NAMESPACE
+          value: {{ $v.namespace }}
+        - name: RESOURCE_TYPE
+          value: "statefulset"
+      command:
+        - /scripts/test-rollout-status.sh
+      args:
+        - {{
+          printf "%s,%s=%s"
+            "postgres-operator.crunchydata.com/data=pgbackrest"
+            "postgres-operator.crunchydata.com/cluster"
+            $k | quote
+        }}
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      securityContext:
+        allowPrivilegeEscalation: false
+{{- end }}
+{{- if .Values.infrastructure.openShiftPipelines.enabled }}
+    #
+    # Tests the OpenShift Pipelines rollout status.
+    #
+  {{- $osp := .Values.infrastructure.openShiftPipelines }}
+    - name: {{ printf "openshift-pipelines-%s" $osp.name }}
+      image: quay.io/codeready-toolchain/oc-client-base:latest
+      env:
+        - name: NAMESPACE
+          value: {{ $osp.namespace }}
+        - name: RESOURCE_TYPE
+          value: "deployment"
+      command:
+        - /scripts/test-rollout-status.sh
+      args:
+        - "app.kubernetes.io/part-of=tekton-pipelines"
+      volumeMounts:
+        - name: scripts
+          mountPath: /scripts
+      securityContext:
+        allowPrivilegeEscalation: false
+{{- end }}
+  volumes:
+    - name: scripts
+      emptyDir: {}

@@ -1,23 +1,25 @@
 package deployer
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"log/slog"
 	"os"
 
-	"github.com/redhat-appstudio/rhtap-cli/pkg/config"
 	"github.com/redhat-appstudio/rhtap-cli/pkg/flags"
 	"github.com/redhat-appstudio/rhtap-cli/pkg/k8s"
+	"github.com/redhat-appstudio/rhtap-cli/pkg/monitor"
 	"github.com/redhat-appstudio/rhtap-cli/pkg/printer"
 
 	"github.com/pkg/errors"
 	"helm.sh/helm/v3/pkg/action"
 	"helm.sh/helm/v3/pkg/chart"
-	"helm.sh/helm/v3/pkg/chart/loader"
 	"helm.sh/helm/v3/pkg/chartutil"
 	"helm.sh/helm/v3/pkg/registry"
 	"helm.sh/helm/v3/pkg/release"
 	"helm.sh/helm/v3/pkg/storage/driver"
+	"k8s.io/cli-runtime/pkg/resource"
 )
 
 // Helm represents the Helm support for the installer. It's responsible for
@@ -26,9 +28,11 @@ type Helm struct {
 	logger *slog.Logger // application logger
 	flags  *flags.Flags // global flags
 
-	dependency config.Dependency     // helm chart coordinates
-	chart      *chart.Chart          // helm chart instance
-	actionCfg  *action.Configuration // helm action configuration
+	chart     *chart.Chart          // helm chart instance
+	namespace string                // kubernetes namespace
+	actionCfg *action.Configuration // helm action configuration
+
+	release *release.Release // helm chart release
 }
 
 // ErrInstallFailed when the Helm chart installation fails.
@@ -36,11 +40,6 @@ var ErrInstallFailed = errors.New("install failed")
 
 // ErrUpgradeFailed when the Helm chart upgrade fails.
 var ErrUpgradeFailed = errors.New("upgrade failed")
-
-// log logger with contextual information.
-func (h *Helm) log() *slog.Logger {
-	return h.dependency.LoggerWith(h.logger.With("type", "helm"))
-}
 
 // printRelease prints the Helm release information.
 func (h *Helm) printRelease(rel *release.Release) {
@@ -54,7 +53,7 @@ func (h *Helm) printRelease(rel *release.Release) {
 func (h *Helm) helmInstall(vals chartutil.Values) (*release.Release, error) {
 	c := action.NewInstall(h.actionCfg)
 	c.GenerateName = false
-	c.Namespace = h.dependency.Namespace
+	c.Namespace = h.namespace
 	c.ReleaseName = h.chart.Name()
 	c.Timeout = h.flags.Timeout
 
@@ -65,7 +64,7 @@ func (h *Helm) helmInstall(vals chartutil.Values) (*release.Release, error) {
 	}
 
 	ctx := backgroundContext(func() {
-		h.log().Warn("Release installation has been cancelled.")
+		h.logger.Warn("Release installation has been cancelled.")
 	})
 
 	rel, err := c.RunWithContext(ctx, h.chart, vals)
@@ -78,7 +77,7 @@ func (h *Helm) helmInstall(vals chartutil.Values) (*release.Release, error) {
 // helmUpgrade equivalent to "helm upgrade" command.
 func (h *Helm) helmUpgrade(vals chartutil.Values) (*release.Release, error) {
 	c := action.NewUpgrade(h.actionCfg)
-	c.Namespace = h.dependency.Namespace
+	c.Namespace = h.namespace
 	c.Timeout = h.flags.Timeout
 
 	c.DryRun = h.flags.DryRun
@@ -87,7 +86,7 @@ func (h *Helm) helmUpgrade(vals chartutil.Values) (*release.Release, error) {
 	}
 
 	ctx := backgroundContext(func() {
-		h.log().Warn("Release upgrade has been cancelled.")
+		h.logger.Warn("Release upgrade has been cancelled.")
 	})
 
 	rel, err := c.RunWithContext(ctx, h.chart.Name(), h.chart, vals)
@@ -97,26 +96,25 @@ func (h *Helm) helmUpgrade(vals chartutil.Values) (*release.Release, error) {
 	return rel, err
 }
 
-// Install installs the Helm chart (Dependency) on the cluster. It checks if the
+// Deploy deploys the Helm chart (Dependency) on the cluster. It checks if the
 // release is already installed in order to use the proper helm-client (action).
-func (h *Helm) Install(vals chartutil.Values) error {
+func (h *Helm) Deploy(vals chartutil.Values) error {
 	c := action.NewHistory(h.actionCfg)
 	c.Max = 1
 
-	var rel *release.Release
-	h.log().Debug("Checking if release exists on the cluster")
+	h.logger.Debug("Checking if release exists on the cluster")
 	var err error
 	if _, err = c.Run(h.chart.Name()); errors.Is(err, driver.ErrReleaseNotFound) {
-		h.log().Info("Installing Helm Chart...")
-		rel, err = h.helmInstall(vals)
+		h.logger.Info("Installing Helm Chart...")
+		h.release, err = h.helmInstall(vals)
 	} else {
-		h.log().Info("Upgrading Helm Chart...")
-		rel, err = h.helmUpgrade(vals)
+		h.logger.Info("Upgrading Helm Chart...")
+		h.release, err = h.helmUpgrade(vals)
 	}
 	if err != nil {
 		return err
 	}
-	h.printRelease(rel)
+	h.printRelease(h.release)
 	return nil
 }
 
@@ -124,39 +122,58 @@ func (h *Helm) Install(vals chartutil.Values) error {
 // deployed by running chart tests and waiting for successful result.
 func (h *Helm) Verify() error {
 	if h.flags.DryRun {
-		h.log().Debug("Dry-run mode enabled, skipping verification")
+		h.logger.Debug("Dry-run mode enabled, skipping verification")
 		return nil
 	}
 
-	h.log().Debug("Verifying the release...")
+	h.logger.Debug("Verifying the release...")
 	c := action.NewReleaseTesting(h.actionCfg)
-	c.Namespace = h.dependency.Namespace
+	c.Namespace = h.namespace
 
 	_, err := c.Run(h.chart.Name())
 	if err != nil {
 		return err
 	}
-	h.log().Info("Release verified!")
+	h.logger.Info("Release verified!")
 	return nil
 }
 
+// VisitReleaseResources collects the resources created by the Helm chart release.
+func (h *Helm) VisitReleaseResources(
+	ctx context.Context,
+	m monitor.Interface,
+) error {
+	releasedResources, err := h.actionCfg.KubeClient.Build(
+		bytes.NewBufferString(h.release.Manifest), true)
+	if err != nil {
+		return err
+	}
+	return releasedResources.Visit(func(r *resource.Info, err error) error {
+		if err != nil {
+			return err
+		}
+		return m.Collect(ctx, r)
+	})
+}
+
 // NewHelm creates a new Helm instance, setting up the Helm action configuration
-// to be used on subsequent Helm interactions. The Helm instance is bound to a
-// single Helm Chart (Dependency).
+// to be used on subsequent interactions. The Helm instance is bound to a single
+// Helm Chart.
 func NewHelm(
 	logger *slog.Logger,
 	f *flags.Flags,
 	kube *k8s.Kube,
-	dep config.Dependency,
+	namespace string,
+	chart *chart.Chart,
 ) (*Helm, error) {
 	actionCfg := new(action.Configuration)
-	getter := kube.RESTClientGetter(dep.Namespace)
+	getter := kube.RESTClientGetter(namespace)
 	driver := os.Getenv("HELM_DRIVER")
 
 	loggerFn := func(format string, v ...interface{}) {
 		logger.WithGroup("helm-cli").Debug(fmt.Sprintf(format, v...))
 	}
-	err := actionCfg.Init(getter, dep.Namespace, driver, loggerFn)
+	err := actionCfg.Init(getter, namespace, driver, loggerFn)
 	if err != nil {
 		return nil, err
 	}
@@ -167,16 +184,15 @@ func NewHelm(
 		return nil, err
 	}
 
-	chart, err := loader.Load(dep.Chart)
-	if err != nil {
-		return nil, err
-	}
-
 	return &Helm{
-		logger:     logger,
-		flags:      f,
-		chart:      chart,
-		actionCfg:  actionCfg,
-		dependency: dep,
+		logger: logger.With(
+			"type", "helm",
+			"chart", chart.Name(),
+			"namespace", namespace,
+		),
+		flags:     f,
+		chart:     chart,
+		namespace: namespace,
+		actionCfg: actionCfg,
 	}, nil
 }

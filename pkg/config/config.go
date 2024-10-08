@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/pflag"
 	"gopkg.in/yaml.v3"
@@ -19,45 +20,6 @@ var ErrEmptyConfig = errors.New("empty configuration")
 // ErrUnmarshalConfig indicates the configuration file structure is invalid.
 var ErrUnmarshalConfig = errors.New("failed to unmarshal configuration")
 
-// FeatureSpec contains the configuration for a specific feature.
-type FeatureSpec struct {
-	// Enabled feature toggle.
-	Enabled bool `yaml:"enabled"`
-	// Namespace target namespace for the feature, which may involve different
-	// Helm charts targeting the specific feature namespace, while the chart
-	// target is deployed in a different namespace.
-	Namespace string `yaml:"namespace"`
-}
-
-// Features contains the configuration for the installer features.
-type Features struct {
-	// CRC Code Ready Containers (CRC).
-	CRC FeatureSpec `yaml:"crc"`
-	// Keycloak Keycloak IAM/SSO.
-	Keycloak FeatureSpec `yaml:"keycloak"`
-	// TrustedProfileAnalyzer Trusted Profile Analyzer (TPA).
-	TrustedProfileAnalyzer FeatureSpec `yaml:"trustedProfileAnalyzer"`
-	// TrustedArtifactSigner Trusted Artifact Signer (TAS).
-	TrustedArtifactSigner FeatureSpec `yaml:"trustedArtifactSigner"`
-	// RedHatDeveloperHub Red Hat Developer Hub (RHDH).
-	RedHatDeveloperHub FeatureSpec `yaml:"redHatDeveloperHub"`
-	// OpenShiftPipelines OpenShift Pipelines.
-	OpenShiftPipelines FeatureSpec `yaml:"openShiftPipelines"`
-}
-
-// Dependency contains a individual Helm chart configuration.
-type Dependency struct {
-	// Chart relative location to the Helm chart directory.
-	Chart string `yaml:"chart"`
-	// Namespace where the Helm chart will be deployed.
-	Namespace string `yaml:"namespace"`
-}
-
-// LoggerWith returns a logger with Dependency contextual information.
-func (d *Dependency) LoggerWith(l *slog.Logger) *slog.Logger {
-	return l.With("dep-chart", d.Chart, "dep-namespace", d.Namespace)
-}
-
 // Spec contains all configuration sections.
 type Spec struct {
 	// Namespace installer's namespace, where the installer's resources will be
@@ -65,7 +27,7 @@ type Spec struct {
 	// different namespace.
 	Namespace string `yaml:"namespace"`
 	// Features contains the configuration for the installer features.
-	Features Features `yaml:"features"`
+	Features map[string]FeatureSpec `yaml:"features"`
 	// Dependencies contains the installer Helm chart dependencies.
 	Dependencies []Dependency `yaml:"dependencies"`
 }
@@ -75,7 +37,7 @@ type Config struct {
 	// configPath is the path to the configuration file, private attribute.
 	configPath string
 	// Installer is the root configuration for the installer.
-	Installer Spec `yaml:"rhtapInstallerCLI"`
+	Installer Spec `yaml:"rhtapCLI"`
 }
 
 // PersistentFlags defines the persistent flags for the CLI.
@@ -88,33 +50,55 @@ func (c *Config) PersistentFlags(f *pflag.FlagSet) {
 	)
 }
 
+// GetBaseDir returns the base directory of the configuration file.
+func (c *Config) GetBaseDir() string {
+	return filepath.Dir(c.configPath)
+}
+
+// GetEnabledDependencies returns a list of enabled dependencies.
+func (c *Config) GetEnabledDependencies(logger *slog.Logger) []Dependency {
+	enabled := []Dependency{}
+	logger.Debug("Getting enabled dependencies")
+	for _, dep := range c.Installer.Dependencies {
+		if dep.Enabled {
+			logger.Debug("Using dependency...", "dep-chart", dep.Chart)
+			enabled = append(enabled, dep)
+		} else {
+			logger.Debug("Skipping dependency...", "dep-chart", dep.Chart)
+		}
+	}
+	return enabled
+}
+
+// GetFeature returns a feature by name, or an error if the feature is not found.
+func (c *Config) GetFeature(name string) (*FeatureSpec, error) {
+	feature, ok := c.Installer.Features[name]
+	if !ok {
+		return nil, fmt.Errorf("feature %s not found", name)
+	}
+	return &feature, nil
+}
+
 // Validate validates the configuration, checking for missing fields.
 func (c *Config) Validate() error {
 	root := c.Installer
+	// The installer itself must have a namespace.
 	if root.Namespace == "" {
 		return fmt.Errorf("%w: missing namespace", ErrInvalidConfig)
 	}
-	if root.Features.Keycloak.Enabled && root.Features.Keycloak.Namespace == "" {
-		return fmt.Errorf("%w: missing namespace for Keycloak", ErrInvalidConfig)
+
+	// Validating the features, making sure every feature entry is valid.
+	for _, feature := range root.Features {
+		if err := feature.Validate(); err != nil {
+			return err
+		}
 	}
-	if root.Features.TrustedProfileAnalyzer.Enabled &&
-		root.Features.TrustedProfileAnalyzer.Namespace == "" {
-		return fmt.Errorf(
-			"%w: missing namespace for TrustedProfileAnalyzer", ErrInvalidConfig)
-	}
-	if root.Features.TrustedArtifactSigner.Enabled &&
-		root.Features.TrustedArtifactSigner.Namespace == "" {
-		return fmt.Errorf(
-			"%w: missing namespace for TrustedArtifactSigner", ErrInvalidConfig)
-	}
-	if root.Features.OpenShiftPipelines.Enabled &&
-		root.Features.OpenShiftPipelines.Namespace == "" {
-		return fmt.Errorf(
-			"%w: missing namespace for OpenShiftPipelines", ErrInvalidConfig)
-	}
+
+	// Making sure the installer has a list of dependencies.
 	if len(root.Dependencies) == 0 {
 		return fmt.Errorf("%w: missing dependencies", ErrInvalidConfig)
 	}
+	// Validating each dependency, making sure they have the required fields.
 	for pos, dep := range root.Dependencies {
 		if dep.Chart == "" {
 			return fmt.Errorf(
@@ -153,5 +137,5 @@ func NewConfigFromFile(configPath string) (*Config, error) {
 // NewConfig returns a new Config instance, pointing to the default "config.yaml"
 // file location.
 func NewConfig() *Config {
-	return &Config{configPath: "config.yaml"}
+	return &Config{configPath: "installer/config.yaml"}
 }

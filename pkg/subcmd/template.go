@@ -3,17 +3,13 @@ package subcmd
 import (
 	"fmt"
 	"log/slog"
-	"os"
 
 	"github.com/redhat-appstudio/rhtap-cli/pkg/config"
-	"github.com/redhat-appstudio/rhtap-cli/pkg/deployer"
-	"github.com/redhat-appstudio/rhtap-cli/pkg/engine"
 	"github.com/redhat-appstudio/rhtap-cli/pkg/flags"
+	"github.com/redhat-appstudio/rhtap-cli/pkg/installer"
 	"github.com/redhat-appstudio/rhtap-cli/pkg/k8s"
-	"github.com/redhat-appstudio/rhtap-cli/pkg/printer"
 
 	"github.com/spf13/cobra"
-	"helm.sh/helm/v3/pkg/chartutil"
 )
 
 // Template represents the "template" subcommand.
@@ -21,7 +17,7 @@ type Template struct {
 	cmd    *cobra.Command // cobra command
 	logger *slog.Logger   // application logger
 	flags  *flags.Flags   // global flags
-	cfg    *config.Spec   // installer configuration
+	cfg    *config.Config // installer configuration
 	kube   *k8s.Kube      // kubernetes client
 
 	// TODO: add support for "--validate", so the rendered resources are validated
@@ -30,7 +26,7 @@ type Template struct {
 	valuesTemplatePath string            // path to the values template file
 	showValues         bool              // show rendered values
 	showManifests      bool              // show rendered manifests
-	dependency         config.Dependency // chart to render
+	dep                config.Dependency // chart to render
 }
 
 var _ Interface = &Template{}
@@ -46,6 +42,9 @@ chart directory, optional.
 
 Additionally, the '--debug' flag should be used to display the raw values template
 payload, regardless of whether it is valid YAML or not.
+
+The installer resources are embedded in the executable, these resources are
+employed by default, to use local files, set the '--embedded' flag to false.
 `
 
 // Cmd exposes the cobra instance.
@@ -56,7 +55,7 @@ func (t *Template) Cmd() *cobra.Command {
 // log logger with contextual information.
 func (t *Template) log() *slog.Logger {
 	return t.flags.LoggerWith(
-		t.dependency.LoggerWith(
+		t.dep.LoggerWith(
 			t.logger.With("values-template", t.valuesTemplatePath),
 		),
 	)
@@ -65,7 +64,7 @@ func (t *Template) log() *slog.Logger {
 // Complete parse the informed args as charts, when valid.
 func (t *Template) Complete(args []string) error {
 	// Dry-run mode is always enabled by default for templating, when manually set
-	// fo false it will return a validation error.
+	// to false it will return a validation error.
 	t.flags.DryRun = true
 
 	if !t.showManifests {
@@ -74,7 +73,7 @@ func (t *Template) Complete(args []string) error {
 	if len(args) != 1 {
 		return fmt.Errorf("expecting one chart, got %d", len(args))
 	}
-	t.dependency.Chart = args[0]
+	t.dep.Chart = args[0]
 	return nil
 }
 
@@ -86,76 +85,59 @@ func (t *Template) Validate() error {
 	if !t.flags.DryRun {
 		return fmt.Errorf("template command is only available in dry-run mode")
 	}
-	if t.dependency.Chart == "" {
+	if t.dep.Chart == "" {
 		return fmt.Errorf("missing chart path")
-	}
-	info, err := os.Stat(t.dependency.Chart)
-	if err != nil {
-		return err
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("chart path %s is not a directory", t.dependency.Chart)
 	}
 	return nil
 }
 
 // Run Renders the templates.
 func (t *Template) Run() error {
-	t.log().Debug("Preparing values template context")
-	variables := engine.NewVariables()
-	if err := variables.SetInstaller(t.cfg); err != nil {
-		return err
-	}
-	if err := variables.SetOpenShift(t.cmd.Context(), t.kube); err != nil {
-		return err
-	}
-
-	t.log().Debug("Loading values template file")
-	valuesTemplatePayload, err := os.ReadFile(t.valuesTemplatePath)
+	cfs, err := newChartFS(t.logger, t.flags, t.cfg)
 	if err != nil {
 		return err
 	}
 
-	t.log().Debug("Rendering values from template")
-	eng := engine.NewEngine(t.kube, string(valuesTemplatePayload))
-	valuesBytes, err := eng.Render(variables)
+	valuesTmplPayload, err := cfs.ReadFile(t.valuesTemplatePath)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to read values template file: %w", err)
 	}
 
+	// Installer for the specific dependency
+	i := installer.NewInstaller(t.logger, t.flags, t.kube, cfs, &t.dep)
+
+	// Setting values and loading cluster's information.
+	if err = i.SetValues(
+		t.cmd.Context(),
+		&t.cfg.Installer,
+		string(valuesTmplPayload),
+	); err != nil {
+		return err
+	}
 	if t.showValues && t.flags.Debug {
-		t.log().Debug("Showing raw results of rendered values template")
-		fmt.Printf("#\n# Values (Raw)\n#\n\n%s\n", valuesBytes)
+		i.PrintRawValues()
 	}
 
-	t.log().Debug("Preparing Helm values")
-	values, err := chartutil.ReadValues(valuesBytes)
-	if err != nil {
+	// Rendering the global values.
+	if err = i.RenderValues(); err != nil {
 		return err
 	}
-
 	if t.showValues {
-		t.log().Debug("Showing parsed values")
-		printer.ValuesPrinter("Values", values)
+		i.PrintValues()
 	}
 
+	// When the manifests aren't shown, we don't need to dry-run "helm install".
 	if !t.showManifests {
 		return nil
 	}
-
-	t.log().Debug("Showing rendered chart manifests")
-	hc, err := deployer.NewHelm(t.logger, t.flags, t.kube, t.dependency)
-	if err != nil {
-		return err
-	}
-	return hc.Install(values)
+	return i.Install(t.cmd.Context())
 }
 
 // NewTemplate creates the "template" subcommand with flags.
 func NewTemplate(
 	logger *slog.Logger,
 	f *flags.Flags,
-	cfg *config.Spec,
+	cfg *config.Config,
 	kube *k8s.Kube,
 ) *Template {
 	t := &Template{
@@ -169,7 +151,7 @@ func NewTemplate(
 		flags:         f,
 		cfg:           cfg,
 		kube:          kube,
-		dependency:    config.Dependency{Namespace: "default"},
+		dep:           config.Dependency{Namespace: "default"},
 		showValues:    true,
 		showManifests: true,
 	}
@@ -178,7 +160,7 @@ func NewTemplate(
 
 	flags.SetValuesTmplFlag(p, &t.valuesTemplatePath)
 
-	p.StringVar(&t.dependency.Namespace, "namespace", t.dependency.Namespace,
+	p.StringVar(&t.dep.Namespace, "namespace", t.dep.Namespace,
 		"namespace to use on template rendering")
 	p.BoolVar(&t.showValues, "show-values", t.showValues,
 		"show values template rendered payload")
