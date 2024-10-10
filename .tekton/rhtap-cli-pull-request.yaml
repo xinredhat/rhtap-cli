@@ -17,7 +17,7 @@ metadata:
     appstudio.openshift.io/component: rhtap-cli
     pipelines.appstudio.openshift.io/type: build
   name: rhtap-cli-on-pull-request
-  namespace: rhtap-shared-team-tenant
+  namespace: xjiang-tenant
 spec:
   params:
   - name: git-url

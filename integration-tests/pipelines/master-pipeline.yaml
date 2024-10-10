@@ -1,0 +1,122 @@
+apiVersion: tekton.dev/v1beta1
+kind: Pipeline
+metadata:
+  name: master-pipeline
+spec:
+  params:
+    - name: SNAPSHOT
+      description: 'The JSON string representing the snapshot of the application under test.'
+      default: '{"components": [{"name":"test-app", "containerImage": "quay.io/example/repo:latest"}]}'
+      type: string
+    - name: test-event-type
+      description: 'Indicates if the test is triggered by a Pull Request or Push event.'
+      default: 'none'
+      type: string
+    - name: konflux-test-infra-secret
+      description: The name of secret where testing infrastructures credentials are stored.
+      type: string
+    - name: cloud-credential-key
+      type: string
+      description: The key secret from konflux-test-infra-secret where all AWS ROSA configurations are stored.
+  tasks:
+    - name: test-metadata
+      taskRef:
+        resolver: git
+        params:
+          - name: url
+            value: https://github.com/konflux-ci/konflux-qe-definitions.git
+          - name: revision
+            value: main
+          - name: pathInRepo
+            value: common/tasks/test-metadata/0.1/test-metadata.yaml
+      params:
+        - name: SNAPSHOT
+          value: $(params.SNAPSHOT)
+        - name: test-name
+          value: $(context.pipelineRun.name)
+    - name: get-pict-file
+      taskSpec:
+        results:
+          - name: pict-file
+            description: pict file to be used in next step
+        steps:
+          - name: download
+            image: quay.io/konflux-ci/appstudio-utils:ab6b0b8e40e440158e7288c73aff1cf83a2cc8a9@sha256:24179f0efd06c65d16868c2d7eb82573cce8e43533de6cea14fec3b7446e0b14
+            script: |
+              #!/usr/bin/env bash
+              curl -o $(results.pict-file.path) https://raw.githubusercontent.com/rhopp/rhtap-e2e/refs/heads/rhopp-patch-1/model.pict
+    - name: generate-configs
+      when:
+        - input: "$(tasks.test-metadata.results.test-event-type)"
+          operator: in
+          values: ["pull_request"]
+      runAfter:
+      - get-pict-file
+      taskSpec:
+        results:
+          - name: configs-json
+            description: Config json generated from pict file.
+        steps:
+          - name: pict-generate
+            image: quay.io/apodhrad/pict:latest
+            script: |
+              #!/usr/bin/env bash
+              echo "$(tasks.get-pict-file.results.pict-file)" > main.pict
+              cat main.pict
+              pict ./main.pict -o:1 -f:json > $(results.configs-json.path)
+    - name: start-nested-pipelines
+      when:
+        - input: "$(tasks.test-metadata.results.test-event-type)"
+          operator: in
+          values: ["pull_request"]
+      params:
+        - name: job-spec
+          value: "$(tasks.test-metadata.results.job-spec)"
+        - name: pull-request-author
+          value: "$(tasks.test-metadata.results.pull-request-author)"
+        - name: pull-request-number
+          value: "$(tasks.test-metadata.results.pull-request-number)"
+        - name: git-repo
+          value: "$(tasks.test-metadata.results.git-repo)"
+        - name: git-org
+          value: "$(tasks.test-metadata.results.git-org)"
+      runAfter:
+        - test-metadata
+        - generate-configs
+      taskSpec:
+        steps:
+          - name: start-pipeline
+            image: quay.io/openshift-pipeline/ci
+            env: 
+              - name: SNAPSHOT
+                value: $(params.SNAPSHOT)
+              - name: JOB_SPEC
+                value: $(tasks.test-metadata.results.job-spec)
+              - name: CONFIGS_JSON
+                value: $(tasks.generate-configs.results.configs-json)
+            script: |
+              #!/usr/bin/env bash
+              set -x
+              echo "Running tests for OCP versions:"
+              echo "$CONFIGS_JSON" | jq -r '.[][] | select(.key == "OCP").value'
+
+              while IFS= read -r version; do
+                (
+                pipeline_run_name=$(tkn pipeline start -f https://raw.githubusercontent.com/redhat-appstudio/rhtap-cli/refs/heads/main/integration-tests/pipelines/rhtap-cli-e2e.yaml \
+                  --param git-url="$(tasks.test-metadata.results.git-url)"\
+                  --param ocp-version="$version"\
+                  --param konflux-test-infra-secret="$(params.konflux-test-infra-secret)" \
+                  --param cloud-credential-key="$(params.cloud-credential-key)" \
+                  --use-param-defaults \
+                  --labels "appstudio.openshift.io/component=rhtap-cli" \
+                  --labels "appstudio.openshift.io/application=rhtap-cli" \
+                  --labels "pipelines.appstudio.openshift.io/type=$(context.pipelineRun.name)" \
+                  --labels "test.appstudio.openshift.io/scenario=multi-level-test" \
+                  --prefix-name "e2e-$version"\
+                  -o name)
+                  tkn pipelinerun logs  "$pipeline_run_name" -f | sed "s/^/$pipeline_run_name: /"
+                ) &
+              done < <(echo "$CONFIGS_JSON" | jq -r '.[][] | select(.key == "OCP").value')
+              wait
+
+              oc get pipelineruns
