@@ -16,13 +16,11 @@ spec:
       type: string
     - name: test-name
       description: 'The name of the test corresponding to a defined Konflux integration test.'
+      type: string
       default: ''
     - name: ocp-version
       description: 'The OpenShift version to use for the ephemeral cluster deployment.'
       type: string
-    - name: test-event-type
-      description: 'Indicates if the test is triggered by a Pull Request or Push event.'
-      default: 'none'
     - name: konflux-test-infra-secret
       description: The name of secret where testing infrastructures credentials are stored.
       type: string
@@ -36,22 +34,28 @@ spec:
       description: 'The type of machine to use for the cluster nodes.'
       type: string
     - name: oci-container-repo
-      default: 'quay.io/konflux-test-storage/rhtap-team/rhtap-cli'
       description: The ORAS container used to store all test artifacts.
+      type: string
+      default: 'quay.io/konflux-test-storage/rhtap-team/rhtap-cli'
     - name: acs_install_enabled
       description: 'Indicates if the ACS installation is enabled.'
+      type: string
       default: 'true'
     - name: quay_install_enabled
       description: 'Indicates if the Quay installation is enabled.'
+      type: string
       default: 'true'
     - name: github_enabled
       description: 'Indicates if the GitHub integration is enabled.'
+      type: string
       default: 'true'
     - name: gitlab_enabled
       description: 'Indicates if the GitLab integration is enabled.'
+      type: string
       default: 'true'
     - name: jenkins_enabled
       description: 'Indicates if the Jenkins integration is enabled.'
+      type: string
       default: 'true'
   tasks:
     - name: rosa-hcp-metadata
