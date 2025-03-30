@@ -27,7 +27,7 @@ github.com/Masterminds/sprig/v3
 # github.com/Masterminds/squirrel v1.5.4
 ## explicit; go 1.14
 github.com/Masterminds/squirrel
-# github.com/Microsoft/hcsshim v0.12.0 => github.com/Microsoft/hcsshim v0.12.9
+# github.com/Microsoft/hcsshim v0.12.9 => github.com/Microsoft/hcsshim v0.12.9
 ## explicit; go 1.22
 # github.com/PuerkitoBio/goquery v1.9.3
 ## explicit; go 1.18
