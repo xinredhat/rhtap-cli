@@ -1,6 +1,8 @@
 module github.com/redhat-appstudio/rhtap-cli
 
-go 1.22.5
+go 1.23
+
+toolchain go1.23.8
 
 require (
 	github.com/Masterminds/sprig/v3 v3.3.0
@@ -32,7 +34,7 @@ require (
 	github.com/Masterminds/semver/v3 v3.3.0 // indirect
 	github.com/Masterminds/squirrel v1.5.4 // indirect
 	github.com/Microsoft/hcsshim v0.12.0 // indirect
-	github.com/PuerkitoBio/goquery v1.9.3 // indirect
+	github.com/PuerkitoBio/goquery v1.10.2 // indirect
 	github.com/andybalholm/cascadia v1.3.3 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
