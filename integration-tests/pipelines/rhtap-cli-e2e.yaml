@@ -33,6 +33,10 @@ spec:
       default: 'quay.io/konflux-test-storage/rhtap-team/rhtap-cli'
       description: The ORAS container used to store all test artifacts.
       type: string
+    - name: oci-container-expiration
+      type: string
+      default: 30d
+      description: Change default expiration of image from 1y to 30 days - https://github.com/konflux-ci/tekton-integration-catalog/blob/main/common/tasks/create-oci-artifact/0.1/create-oci-artifact.yaml#L23
     - name: job-spec
       type: string
     - name: konflux-test-infra-secret
@@ -60,6 +64,10 @@ spec:
       type: string
       description: "Image from where the `tssc` binary will be extracted (from path /usr/local/bin)."
       default: "quay.io/rhtap/rhtap-cli:latest"
+    - name: tssc-test-image
+      type: string
+      description: "Image from where the `tssc-test` binary will be extracted (from path /usr/local/bin)."
+      default: "quay.io/redhat-user-workloads/rhtap-shared-team-tenant/tssc-test:latest"
   tasks:
     - name: rosa-hcp-metadata
       taskRef:
@@ -84,6 +92,8 @@ spec:
       params:
         - name: oci-container-repo
           value: $(params.oci-container-repo)
+        - name: oci-container-expiration
+          value: $(params.oci-container-expiration)
         - name: oci-container-tag
           value: $(context.pipelineRun.name)
     - name: provision-rosa
@@ -174,11 +184,11 @@ spec:
         resolver: git
         params:
           - name: url
-            value: https://github.com/redhat-appstudio/rhtap-e2e.git
+            value: https://github.com/xinredhat/tssc-test.git
           - name: revision
-            value: main
+            value: tssc-test-task
           - name: pathInRepo
-            value: integration-tests/tasks/rhtap-e2e.yaml
+            value: integration-tests/tasks/tssc-e2e.yaml
       params:
         - name: job-spec
           value: $(params.job-spec)
@@ -192,6 +202,8 @@ spec:
           value: $(params.pipeline_config)
         - name: ocp-version
           value: "$(params.ocp-version)"
+        - name: tssc-test-image
+          value: $(params.tssc-test-image)
   finally:
     - name: deprovision-rosa-collect-artifacts
       taskRef:

@@ -126,10 +126,7 @@ spec:
               #!/usr/bin/env bash
 
               tssc_image=$(echo "${SNAPSHOT}" | jq -r '.components[] |select(.name=="rhtap-cli").containerImage')
-              if [[ -z "$tssc_image" ]]; then
-                echo "rhtap-cli image was not found in SNAPSHOT, using default"
-                tssc_image="quay.io/rhtap/rhtap-cli:latest"
-              fi
+              tssc_test_image=$(echo "${SNAPSHOT}" | jq -r '.components[] |select(.name=="tssc-test").containerImage')
 
               # Waits for condition for all started pipelines
               function waitFor() {
@@ -184,7 +181,7 @@ spec:
                 SCM=$(echo "$config" | jq -r '.[] | select(.key == "SCM").value')
                 PIPELINE=$(echo "$config" | jq -r '.[] | select(.key == "Pipeline").value')
                 AUTH=$(echo "$config" | jq -r '.[] | select(.key == "AUTH").value')
-                PIPELINE_RUN=$(tkn pipeline start -f https://raw.githubusercontent.com/$REPO_ORG/rhtap-cli/refs/heads/$BRANCH/integration-tests/pipelines/rhtap-cli-e2e.yaml \
+                PIPELINE_RUN=$(tkn pipeline start -f https://raw.githubusercontent.com/xinredhat/rhtap-cli/refs/heads/tssc-test/integration-tests/pipelines/rhtap-cli-e2e.yaml \
                   --param ocp-version="$OCP_VERSION"\
                   --param job-spec="$JOB_SPEC"\
                   --param konflux-test-infra-secret="$(params.konflux-test-infra-secret)" \
@@ -194,7 +191,8 @@ spec:
                   --param scm_config="$SCM" \
                   --param pipeline_config="$PIPELINE" \
                   --param auth_config="$AUTH" \
-                  --param tssc-image="${tssc_image}" \
+                  $(if [[ "${tssc_image}" != "" ]]; then echo "--param tssc-image=${tssc_image}"; fi) \
+                  $(if [[ "${tssc_test_image}" != "" ]]; then echo "--param tssc-test-image=${tssc_test_image}"; fi) \
                   --use-param-defaults \
                   --labels "appstudio.openshift.io/component=${KONFLUX_COMPONENT_NAME}" \
                   --labels "appstudio.openshift.io/application=${KONFLUX_APPLICATION_NAME}" \
